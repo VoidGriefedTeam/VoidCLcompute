@@ -1,0 +1,22 @@
+# Build artifacts
+*.dll
+*.lib
+*.exe
+*.obj
+*.pdb
+*.exp
+*.ilk
+
+# Kernel binary cache (device-specific, regenerated at runtime)
+gwcl_kernel_cache/
+
+# Vendor SDK (don't commit third-party binaries/headers)
+third_party/OpenCL/
+
+# Editor/OS junk
+.vs/
+.vscode/
+*.suo
+*.user
+Thumbs.db
+.DS_Store
