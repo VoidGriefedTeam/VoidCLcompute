@@ -46,6 +46,7 @@ static std::string      s_deviceName;
 
 enum OpId {
     OP_ADD, OP_SUB, OP_MUL, OP_DIV,
+    OP_ADD_SCALAR, OP_SUB_SCALAR, OP_MUL_SCALAR, OP_DIV_SCALAR,
     OP_SIN, OP_COS, OP_TAN, OP_ASIN, OP_ACOS, OP_ATAN,
     OP_HEAVY
 };
@@ -102,6 +103,25 @@ static const char* kUnaryTemplateVec =
     "        vstore4(vr, 0, out + base);\n"
     "    } else {\n"
     "        for (uint k = 0; k < remain; k++) out[base+k] = %s(a[base+k]);\n"
+    "    }\n"
+    "}\n";
+
+// Scalar variant: ONE input array + a plain (non-buffer) scalar kernel arg.
+// No second array is allocated or uploaded — the scalar value travels as a
+// regular kernel argument via clSetKernelArg, same as `count`.
+static const char* kScalarTemplateVec =
+    "__kernel void compute(__global const float* a, float scalarValue, "
+    "__global float* out, uint count) {\n"
+    "    uint idx = get_global_id(0);\n"
+    "    uint base = idx * 4;\n"
+    "    if (base >= count) return;\n"
+    "    uint remain = count - base;\n"
+    "    if (remain >= 4) {\n"
+    "        float4 va = vload4(0, a + base);\n"
+    "        float4 vr = va %s scalarValue;\n"
+    "        vstore4(vr, 0, out + base);\n"
+    "    } else {\n"
+    "        for (uint k = 0; k < remain; k++) out[base+k] = a[base+k] %s scalarValue;\n"
     "    }\n"
     "}\n";
 
@@ -200,6 +220,10 @@ static cl_kernel getOrBuildKernel(OpId op) {
                 case OP_SUB:  std::snprintf(srcBuffer, sizeof(srcBuffer), kBinaryTemplateVec, "-", "-"); break;
                 case OP_MUL:  std::snprintf(srcBuffer, sizeof(srcBuffer), kBinaryTemplateVec, "*", "*"); break;
                 case OP_DIV:  std::snprintf(srcBuffer, sizeof(srcBuffer), kBinaryTemplateVec, "/", "/"); break;
+                case OP_ADD_SCALAR: std::snprintf(srcBuffer, sizeof(srcBuffer), kScalarTemplateVec, "+", "+"); break;
+                case OP_SUB_SCALAR: std::snprintf(srcBuffer, sizeof(srcBuffer), kScalarTemplateVec, "-", "-"); break;
+                case OP_MUL_SCALAR: std::snprintf(srcBuffer, sizeof(srcBuffer), kScalarTemplateVec, "*", "*"); break;
+                case OP_DIV_SCALAR: std::snprintf(srcBuffer, sizeof(srcBuffer), kScalarTemplateVec, "/", "/"); break;
                 case OP_SIN:  std::snprintf(srcBuffer, sizeof(srcBuffer), kUnaryTemplateVec, "native_sin", "native_sin"); break;
                 case OP_COS:  std::snprintf(srcBuffer, sizeof(srcBuffer), kUnaryTemplateVec, "native_cos", "native_cos"); break;
                 case OP_TAN:  std::snprintf(srcBuffer, sizeof(srcBuffer), kUnaryTemplateVec, "native_tan", "native_tan"); break;
@@ -437,6 +461,40 @@ static void runUnaryOp(OpId op, const float* input, float* result, int count) {
     std::memcpy(result, bufs.mappedOut, bytes);
 }
 
+// One input array + one plain scalar kernel argument — no second array,
+// no fake "fill an array with the same number" step. Reuses the same
+// buffer pool as the unary ops since the memory shape (1 in, 1 out) is
+// identical; only the kernel argument list differs.
+static void runScalarOp(OpId op, const float* a, float scalar, float* result, int count) {
+    cl_kernel kernel = getOrBuildKernel(op);
+    if (!kernel) return;
+
+    cl_int err = CL_SUCCESS;
+    size_t bytes = (size_t)count * sizeof(float);
+    UnaryBufSet& bufs = getUnaryBuffers(bytes, err);
+    if (!bufs.mappedA || !bufs.mappedOut) { checkErr(err, "getUnaryBuffers"); return; }
+
+    std::memcpy(bufs.mappedA, a, bytes);
+
+    unsigned int uCount = (unsigned int)count;
+    clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufs.a);
+    clSetKernelArg(kernel, 1, sizeof(float), &scalar);
+    clSetKernelArg(kernel, 2, sizeof(cl_mem), &bufs.out);
+    clSetKernelArg(kernel, 3, sizeof(unsigned int), &uCount);
+
+    size_t items = (((size_t)count + 3) / 4);
+    size_t localSize = s_preferredMultiple.count(op) ? s_preferredMultiple[op] : 64;
+    size_t globalSize = roundUp(items, localSize);
+
+    cl_event kernelDone = nullptr;
+    err = clEnqueueNDRangeKernel(s_queue, kernel, 1, nullptr, &globalSize, &localSize, 0, nullptr, &kernelDone);
+    checkErr(err, "clEnqueueNDRangeKernel");
+
+    clWaitForEvents(1, &kernelDone);
+    clReleaseEvent(kernelDone);
+    std::memcpy(result, bufs.mappedOut, bytes);
+}
+
 // ============================================================
 // Exported function wrappers
 // ============================================================
@@ -455,3 +513,8 @@ void gpu_atan(const float* input, float* result, int count) { runUnaryOp(OP_ATAN
 void gpu_heavy(const float* a, const float* b, float* result, int count) {
     runBinaryOp(OP_HEAVY, a, b, result, count);
 }
+
+void gpu_add_scalar(const float* a, float scalar, float* result, int count)      { runScalarOp(OP_ADD_SCALAR, a, scalar, result, count); }
+void gpu_subtract_scalar(const float* a, float scalar, float* result, int count) { runScalarOp(OP_SUB_SCALAR, a, scalar, result, count); }
+void gpu_multiply_scalar(const float* a, float scalar, float* result, int count) { runScalarOp(OP_MUL_SCALAR, a, scalar, result, count); }
+void gpu_divide_scalar(const float* a, float scalar, float* result, int count)   { runScalarOp(OP_DIV_SCALAR, a, scalar, result, count); }

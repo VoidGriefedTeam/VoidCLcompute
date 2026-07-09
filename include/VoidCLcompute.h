@@ -22,6 +22,13 @@ VOIDCLCOMPUTE_API void gpu_add(const float* a, const float* b, float* result, in
 VOIDCLCOMPUTE_API void gpu_subtract(const float* a, const float* b, float* result, int count);
 VOIDCLCOMPUTE_API void gpu_multiply(const float* a, const float* b, float* result, int count);
 VOIDCLCOMPUTE_API void gpu_divide(const float* a, const float* b, float* result, int count);
+
+// Scalar variants: array-op-single-number, no second array needed.
+VOIDCLCOMPUTE_API void gpu_add_scalar(const float* a, float scalar, float* result, int count);
+VOIDCLCOMPUTE_API void gpu_subtract_scalar(const float* a, float scalar, float* result, int count);
+VOIDCLCOMPUTE_API void gpu_multiply_scalar(const float* a, float scalar, float* result, int count);
+VOIDCLCOMPUTE_API void gpu_divide_scalar(const float* a, float scalar, float* result, int count);
+
 VOIDCLCOMPUTE_API void gpu_sin(const float* input, float* result, int count);
 VOIDCLCOMPUTE_API void gpu_cos(const float* input, float* result, int count);
 VOIDCLCOMPUTE_API void gpu_tan(const float* input, float* result, int count);
