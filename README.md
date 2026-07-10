@@ -3,6 +3,7 @@
 A lightweight C++ / C-ABI wrapper around OpenCL for elementwise GPU array
 math — add, subtract, multiply, divide, and trig functions applied across
 large float arrays, without hand-writing OpenCL boilerplate every time.
+Also Check voidcl.vercel.app or voidclcompute.vercel.app.
 
 Built by **Void** / **VoidGriefedTeam**.
 
