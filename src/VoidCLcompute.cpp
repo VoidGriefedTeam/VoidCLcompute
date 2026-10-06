@@ -29,14 +29,17 @@
 #include "VoidCLcompute.h"
 
 #include <CL/cl.h>
+#include <cctype>
+#include <climits>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <system_error>
 #include <unordered_map>
 #include <vector>
-#include <string>
-#include <fstream>
-#include <direct.h> // _mkdir on Windows
 
 static cl_platform_id   s_platform = nullptr;
 static cl_device_id     s_device   = nullptr;
@@ -174,7 +177,8 @@ static bool loadCachedBinary(const std::string& path, std::vector<unsigned char>
 }
 
 static void saveCachedBinary(const std::string& path, const unsigned char* data, size_t size) {
-    _mkdir(kCacheDir); // ignore error if it already exists
+    std::error_code ec;
+    std::filesystem::create_directories(kCacheDir, ec); // ignore error if it already exists
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (f) f.write(reinterpret_cast<const char*>(data), (std::streamsize)size);
 }
@@ -394,20 +398,38 @@ static size_t roundUp(size_t n, size_t multiple) {
     return ((n + multiple - 1) / multiple) * multiple;
 }
 
-static void runBinaryOp(OpId op, const float* a, const float* b, float* result, int count) {
+// Common size check for every op. Returns false if there's nothing to do
+// (empty input) or the size can't be passed to the kernel's 32-bit count.
+static bool validCount(size_t n) {
+    if (n == 0) return false;
+    if (n > UINT_MAX) {
+        std::printf("[VoidCLcompute] Input too large (%zu elements, max %u)\n", n, UINT_MAX);
+        return false;
+    }
+    return true;
+}
+
+static void runBinaryOp(OpId op, const std::vector<float>& a, const std::vector<float>& b, std::vector<float>& result) {
+    if (a.size() != b.size()) {
+        std::printf("[VoidCLcompute] Size mismatch: a has %zu elements, b has %zu\n", a.size(), b.size());
+        return;
+    }
+    const size_t count = a.size();
+    if (!validCount(count)) return;
+
     cl_kernel kernel = getOrBuildKernel(op);
     if (!kernel) return;
 
     cl_int err = CL_SUCCESS;
-    size_t bytes = (size_t)count * sizeof(float);
+    size_t bytes = count * sizeof(float);
     BinaryBufSet& bufs = getBinaryBuffers(bytes, err);
     if (!bufs.mappedA || !bufs.mappedB || !bufs.mappedOut) { checkErr(err, "getBinaryBuffers"); return; }
 
     // Direct copy into mapped (pinned) host-visible memory — avoids the
     // driver's internal staging-buffer copy that plain WriteBuffer implies
     // on discrete GPUs without CL_MEM_ALLOC_HOST_PTR.
-    std::memcpy(bufs.mappedA, a, bytes);
-    std::memcpy(bufs.mappedB, b, bytes);
+    std::memcpy(bufs.mappedA, a.data(), bytes);
+    std::memcpy(bufs.mappedB, b.data(), bytes);
 
     unsigned int uCount = (unsigned int)count;
     clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufs.a);
@@ -417,7 +439,7 @@ static void runBinaryOp(OpId op, const float* a, const float* b, float* result, 
 
     // OP_HEAVY is scalar (one work-item per element); vectorized ops
     // process 4 elements per work-item, so divide the item count by 4.
-    size_t items = (op == OP_HEAVY) ? (size_t)count : (((size_t)count + 3) / 4);
+    size_t items = (op == OP_HEAVY) ? count : ((count + 3) / 4);
     size_t localSize = s_preferredMultiple.count(op) ? s_preferredMultiple[op] : 64;
     size_t globalSize = roundUp(items, localSize);
 
@@ -429,26 +451,32 @@ static void runBinaryOp(OpId op, const float* a, const float* b, float* result, 
     // lets unrelated in-flight work on an out-of-order queue keep running.
     clWaitForEvents(1, &kernelDone);
     clReleaseEvent(kernelDone);
-    std::memcpy(result, bufs.mappedOut, bytes);
+
+    // Size the output after the kernel is done, so `result` may safely alias `a` or `b`.
+    result.resize(count);
+    std::memcpy(result.data(), bufs.mappedOut, bytes);
 }
 
-static void runUnaryOp(OpId op, const float* input, float* result, int count) {
+static void runUnaryOp(OpId op, const std::vector<float>& input, std::vector<float>& result) {
+    const size_t count = input.size();
+    if (!validCount(count)) return;
+
     cl_kernel kernel = getOrBuildKernel(op);
     if (!kernel) return;
 
     cl_int err = CL_SUCCESS;
-    size_t bytes = (size_t)count * sizeof(float);
+    size_t bytes = count * sizeof(float);
     UnaryBufSet& bufs = getUnaryBuffers(bytes, err);
     if (!bufs.mappedA || !bufs.mappedOut) { checkErr(err, "getUnaryBuffers"); return; }
 
-    std::memcpy(bufs.mappedA, input, bytes);
+    std::memcpy(bufs.mappedA, input.data(), bytes);
 
     unsigned int uCount = (unsigned int)count;
     clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufs.a);
     clSetKernelArg(kernel, 1, sizeof(cl_mem), &bufs.out);
     clSetKernelArg(kernel, 2, sizeof(unsigned int), &uCount);
 
-    size_t items = (((size_t)count + 3) / 4);
+    size_t items = (count + 3) / 4;
     size_t localSize = s_preferredMultiple.count(op) ? s_preferredMultiple[op] : 64;
     size_t globalSize = roundUp(items, localSize);
 
@@ -458,23 +486,28 @@ static void runUnaryOp(OpId op, const float* input, float* result, int count) {
 
     clWaitForEvents(1, &kernelDone);
     clReleaseEvent(kernelDone);
-    std::memcpy(result, bufs.mappedOut, bytes);
+
+    result.resize(count);
+    std::memcpy(result.data(), bufs.mappedOut, bytes);
 }
 
 // One input array + one plain scalar kernel argument — no second array,
 // no fake "fill an array with the same number" step. Reuses the same
 // buffer pool as the unary ops since the memory shape (1 in, 1 out) is
 // identical; only the kernel argument list differs.
-static void runScalarOp(OpId op, const float* a, float scalar, float* result, int count) {
+static void runScalarOp(OpId op, const std::vector<float>& a, float scalar, std::vector<float>& result) {
+    const size_t count = a.size();
+    if (!validCount(count)) return;
+
     cl_kernel kernel = getOrBuildKernel(op);
     if (!kernel) return;
 
     cl_int err = CL_SUCCESS;
-    size_t bytes = (size_t)count * sizeof(float);
+    size_t bytes = count * sizeof(float);
     UnaryBufSet& bufs = getUnaryBuffers(bytes, err);
     if (!bufs.mappedA || !bufs.mappedOut) { checkErr(err, "getUnaryBuffers"); return; }
 
-    std::memcpy(bufs.mappedA, a, bytes);
+    std::memcpy(bufs.mappedA, a.data(), bytes);
 
     unsigned int uCount = (unsigned int)count;
     clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufs.a);
@@ -482,7 +515,7 @@ static void runScalarOp(OpId op, const float* a, float scalar, float* result, in
     clSetKernelArg(kernel, 2, sizeof(cl_mem), &bufs.out);
     clSetKernelArg(kernel, 3, sizeof(unsigned int), &uCount);
 
-    size_t items = (((size_t)count + 3) / 4);
+    size_t items = (count + 3) / 4;
     size_t localSize = s_preferredMultiple.count(op) ? s_preferredMultiple[op] : 64;
     size_t globalSize = roundUp(items, localSize);
 
@@ -492,29 +525,51 @@ static void runScalarOp(OpId op, const float* a, float scalar, float* result, in
 
     clWaitForEvents(1, &kernelDone);
     clReleaseEvent(kernelDone);
-    std::memcpy(result, bufs.mappedOut, bytes);
+
+    result.resize(count);
+    std::memcpy(result.data(), bufs.mappedOut, bytes);
 }
 
 // ============================================================
 // Exported function wrappers
 // ============================================================
-void gpu_add(const float* a, const float* b, float* result, int count)      { runBinaryOp(OP_ADD, a, b, result, count); }
-void gpu_subtract(const float* a, const float* b, float* result, int count) { runBinaryOp(OP_SUB, a, b, result, count); }
-void gpu_multiply(const float* a, const float* b, float* result, int count) { runBinaryOp(OP_MUL, a, b, result, count); }
-void gpu_divide(const float* a, const float* b, float* result, int count)   { runBinaryOp(OP_DIV, a, b, result, count); }
+using Vec = std::vector<float>;
 
-void gpu_sin(const float* input, float* result, int count)  { runUnaryOp(OP_SIN, input, result, count); }
-void gpu_cos(const float* input, float* result, int count)  { runUnaryOp(OP_COS, input, result, count); }
-void gpu_tan(const float* input, float* result, int count)  { runUnaryOp(OP_TAN, input, result, count); }
-void gpu_asin(const float* input, float* result, int count) { runUnaryOp(OP_ASIN, input, result, count); }
-void gpu_acos(const float* input, float* result, int count) { runUnaryOp(OP_ACOS, input, result, count); }
-void gpu_atan(const float* input, float* result, int count) { runUnaryOp(OP_ATAN, input, result, count); }
+void gpu_add(const Vec& a, const Vec& b, Vec& result)      { runBinaryOp(OP_ADD, a, b, result); }
+void gpu_subtract(const Vec& a, const Vec& b, Vec& result) { runBinaryOp(OP_SUB, a, b, result); }
+void gpu_multiply(const Vec& a, const Vec& b, Vec& result) { runBinaryOp(OP_MUL, a, b, result); }
+void gpu_divide(const Vec& a, const Vec& b, Vec& result)   { runBinaryOp(OP_DIV, a, b, result); }
 
-void gpu_heavy(const float* a, const float* b, float* result, int count) {
-    runBinaryOp(OP_HEAVY, a, b, result, count);
-}
+void gpu_add(const Vec& a, float scalar, Vec& result)      { runScalarOp(OP_ADD_SCALAR, a, scalar, result); }
+void gpu_subtract(const Vec& a, float scalar, Vec& result) { runScalarOp(OP_SUB_SCALAR, a, scalar, result); }
+void gpu_multiply(const Vec& a, float scalar, Vec& result) { runScalarOp(OP_MUL_SCALAR, a, scalar, result); }
+void gpu_divide(const Vec& a, float scalar, Vec& result)   { runScalarOp(OP_DIV_SCALAR, a, scalar, result); }
 
-void gpu_add_scalar(const float* a, float scalar, float* result, int count)      { runScalarOp(OP_ADD_SCALAR, a, scalar, result, count); }
-void gpu_subtract_scalar(const float* a, float scalar, float* result, int count) { runScalarOp(OP_SUB_SCALAR, a, scalar, result, count); }
-void gpu_multiply_scalar(const float* a, float scalar, float* result, int count) { runScalarOp(OP_MUL_SCALAR, a, scalar, result, count); }
-void gpu_divide_scalar(const float* a, float scalar, float* result, int count)   { runScalarOp(OP_DIV_SCALAR, a, scalar, result, count); }
+void gpu_sin(const Vec& input, Vec& result)  { runUnaryOp(OP_SIN, input, result); }
+void gpu_cos(const Vec& input, Vec& result)  { runUnaryOp(OP_COS, input, result); }
+void gpu_tan(const Vec& input, Vec& result)  { runUnaryOp(OP_TAN, input, result); }
+void gpu_asin(const Vec& input, Vec& result) { runUnaryOp(OP_ASIN, input, result); }
+void gpu_acos(const Vec& input, Vec& result) { runUnaryOp(OP_ACOS, input, result); }
+void gpu_atan(const Vec& input, Vec& result) { runUnaryOp(OP_ATAN, input, result); }
+
+void gpu_heavy(const Vec& a, const Vec& b, Vec& result) { runBinaryOp(OP_HEAVY, a, b, result); }
+
+// ---- Return-by-value overloads (thin wrappers over the out-param versions) ----
+Vec gpu_add(const Vec& a, const Vec& b) { Vec r; runBinaryOp(OP_ADD, a, b, r); return r; }
+Vec gpu_subtract(const Vec& a, const Vec& b) { Vec r; runBinaryOp(OP_SUB, a, b, r); return r; }
+Vec gpu_multiply(const Vec& a, const Vec& b) { Vec r; runBinaryOp(OP_MUL, a, b, r); return r; }
+Vec gpu_divide(const Vec& a, const Vec& b) { Vec r; runBinaryOp(OP_DIV, a, b, r); return r; }
+
+Vec gpu_add(const Vec& a, float scalar) { Vec r; runScalarOp(OP_ADD_SCALAR, a, scalar, r); return r; }
+Vec gpu_subtract(const Vec& a, float scalar) { Vec r; runScalarOp(OP_SUB_SCALAR, a, scalar, r); return r; }
+Vec gpu_multiply(const Vec& a, float scalar) { Vec r; runScalarOp(OP_MUL_SCALAR, a, scalar, r); return r; }
+Vec gpu_divide(const Vec& a, float scalar) { Vec r; runScalarOp(OP_DIV_SCALAR, a, scalar, r); return r; }
+
+Vec gpu_sin(const Vec& input) { Vec r; runUnaryOp(OP_SIN, input, r); return r; }
+Vec gpu_cos(const Vec& input) { Vec r; runUnaryOp(OP_COS, input, r); return r; }
+Vec gpu_tan(const Vec& input) { Vec r; runUnaryOp(OP_TAN, input, r); return r; }
+Vec gpu_asin(const Vec& input) { Vec r; runUnaryOp(OP_ASIN, input, r); return r; }
+Vec gpu_acos(const Vec& input) { Vec r; runUnaryOp(OP_ACOS, input, r); return r; }
+Vec gpu_atan(const Vec& input) { Vec r; runUnaryOp(OP_ATAN, input, r); return r; }
+
+Vec gpu_heavy(const Vec& a, const Vec& b) { Vec r; runBinaryOp(OP_HEAVY, a, b, r); return r; }

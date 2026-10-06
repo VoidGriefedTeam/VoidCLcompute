@@ -1,8 +1,8 @@
 # VoidCLcompute
 
-A lightweight C++ / C-ABI wrapper around OpenCL for elementwise GPU array
+A lightweight C++ wrapper around OpenCL for elementwise GPU array
 math — add, subtract, multiply, divide, and trig functions applied across
-large float arrays, without hand-writing OpenCL boilerplate every time.
+large `std::vector<float>`s, without hand-writing OpenCL boilerplate every time.
 Also Check [voidcl.vercel.app](https://voidcl.vercel.app) or [voidclcompute.vercel.app](https://voidclcompute.vercel.app).
 
 Built by **Void** / **VoidGriefedTeam**.
@@ -15,7 +15,7 @@ single line of actual math. VoidCLcompute handles all of that once, and
 exposes simple functions:
 
 ```cpp
-gpu_add(a.data(), b.data(), result.data(), count);
+std::vector<float> result = gpu_add(a, b);
 ```
 
 ## What this is (and isn't)
@@ -39,10 +39,12 @@ int main() {
 
     std::vector<float> a = {1, 2, 3, 4};
     std::vector<float> b = {10, 20, 30, 40};
-    std::vector<float> result(4);
 
-    gpu_add(a.data(), b.data(), result.data(), 4);
-    // result = {11, 22, 33, 44}
+    std::vector<float> sum = gpu_add(a, b);
+    // sum = {11, 22, 33, 44}
+
+    std::vector<float> result = gpu_multiply(sum, 0.5f);
+    // result = {5.5, 11, 16.5, 22}  (array * scalar)
 
     for (float r : result) printf("%f\n", r);
 
@@ -53,29 +55,74 @@ int main() {
 
 ## API
 
-```c
+```cpp
 bool GC_Init();
 void GC_Shutdown();
 void GC_TrimBufferCache();   // optional: release pooled GPU buffers early
 
-void gpu_add(const float* a, const float* b, float* result, int count);
-void gpu_subtract(const float* a, const float* b, float* result, int count);
-void gpu_multiply(const float* a, const float* b, float* result, int count);
-void gpu_divide(const float* a, const float* b, float* result, int count);
+using Vec = std::vector<float>;
 
-void gpu_sin(const float* input, float* result, int count);
-void gpu_cos(const float* input, float* result, int count);
-void gpu_tan(const float* input, float* result, int count);
-void gpu_asin(const float* input, float* result, int count);  // input must be in [-1, 1]
-void gpu_acos(const float* input, float* result, int count);  // input must be in [-1, 1]
-void gpu_atan(const float* input, float* result, int count);
+// ---- Return-by-value (preferred): Vec c = gpu_add(a, b); ----
+// array (op) array — a and b must be the same size
+Vec gpu_add     (const Vec& a, const Vec& b);
+Vec gpu_subtract(const Vec& a, const Vec& b);
+Vec gpu_multiply(const Vec& a, const Vec& b);
+Vec gpu_divide  (const Vec& a, const Vec& b);
 
-void gpu_heavy(const float* a, const float* b, float* result, int count);
+// array (op) single number
+Vec gpu_add     (const Vec& a, float scalar);
+Vec gpu_subtract(const Vec& a, float scalar);
+Vec gpu_multiply(const Vec& a, float scalar);
+Vec gpu_divide  (const Vec& a, float scalar);
+
+Vec gpu_sin (const Vec& input);
+Vec gpu_cos (const Vec& input);
+Vec gpu_tan (const Vec& input);
+Vec gpu_asin(const Vec& input);   // input must be in [-1, 1]
+Vec gpu_acos(const Vec& input);   // input must be in [-1, 1]
+Vec gpu_atan(const Vec& input);
+
+Vec gpu_heavy(const Vec& a, const Vec& b);
+
+// ---- Out-parameter versions (reuse an existing vector's storage in hot loops) ----
+// array (op) array — a and b must be the same size
+void gpu_add     (const Vec& a, const Vec& b, Vec& result);
+void gpu_subtract(const Vec& a, const Vec& b, Vec& result);
+void gpu_multiply(const Vec& a, const Vec& b, Vec& result);
+void gpu_divide  (const Vec& a, const Vec& b, Vec& result);
+
+// array (op) single number — same names, picked by the 2nd argument's type
+void gpu_add     (const Vec& a, float scalar, Vec& result);
+void gpu_subtract(const Vec& a, float scalar, Vec& result);
+void gpu_multiply(const Vec& a, float scalar, Vec& result);
+void gpu_divide  (const Vec& a, float scalar, Vec& result);
+
+void gpu_sin (const Vec& input, Vec& result);
+void gpu_cos (const Vec& input, Vec& result);
+void gpu_tan (const Vec& input, Vec& result);
+void gpu_asin(const Vec& input, Vec& result);  // input must be in [-1, 1]
+void gpu_acos(const Vec& input, Vec& result);  // input must be in [-1, 1]
+void gpu_atan(const Vec& input, Vec& result);
+
+void gpu_heavy(const Vec& a, const Vec& b, Vec& result);
 ```
 
-All ops are blocking — `result` is ready to read the moment the call
-returns. `count` tells the library how many floats are in your arrays,
-since a raw pointer alone doesn't carry that information.
+All ops are blocking — the result is ready to read the moment the call
+returns. The element count comes from the input vectors.
+
+Return-by-value: on error (empty input, size mismatch between `a` and `b`)
+you get an empty vector back.
+
+Out-parameter versions: `result` is resized to match the input, so you
+don't need to pre-size it (but you can, to avoid a reallocation in hot
+loops). `result` may be the same vector as an input. Empty input is a no-op,
+and a size mismatch prints an error and leaves `result` untouched.
+
+> **ABI note:** these functions pass `std::vector` across the DLL boundary,
+> so the library and your program must be built with the same compiler,
+> standard library and configuration (e.g. both Release). Building through
+> this repo's CMake project guarantees that. `GC_Init` / `GC_Shutdown` /
+> `GC_TrimBufferCache` remain plain `extern "C"` functions.
 
 ## Performance notes
 
@@ -91,16 +138,28 @@ since a raw pointer alone doesn't carry that information.
 
 Full design rationale in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Building (Windows / MSVC)
+## Building
 
-1. Get the OpenCL SDK — see [third_party/README.md](third_party/README.md)
-   for where to place it.
-2. Open a **Developer Command Prompt for VS**.
-3. From the repo root, run:
-   ```
-   build.bat
-   ```
-   This produces `VoidCLcompute.dll` / `.lib` and `benchmark.exe`.
+Requires CMake 3.16+, a C++17 compiler, and an OpenCL SDK (headers + the
+OpenCL library) — see [third_party/README.md](third_party/README.md) for
+where to put it or how to point CMake at it.
+
+```
+cmake -B build
+cmake --build build --config Release
+```
+
+This produces `VoidCLcompute.dll` (`libVoidCLcompute.so` on Linux) and the
+`benchmark` executable, both in `build/` (or `build/Release/` with the
+Visual Studio generator).
+
+Options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `-DVOIDCL_BUILD_BENCHMARK=OFF` | `ON` | Skip the benchmark example |
+| `-DVOIDCL_ENABLE_AVX2=OFF` | `ON` | Don't compile with AVX2 (for CPUs without it) |
+| `-DCMAKE_PREFIX_PATH=<sdk>` | — | Where to find an OpenCL SDK installed elsewhere |
 
 ## Benchmark example
 
@@ -111,9 +170,9 @@ decisively at scale — sub-millisecond for large arrays — thanks to
 dedicated hardware trig units outperforming software `sinf`/`cosf`
 approximations on the CPU.
 
-Run it after building:
+Run it after building (from the folder containing the built binaries):
 ```
-benchmark.exe
+benchmark
 ```
 
 ## License

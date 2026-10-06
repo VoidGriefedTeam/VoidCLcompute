@@ -1,0 +1,42 @@
+{
+    "version": 10,
+
+    "cmakeMinimumRequired": {
+        "major": 4,
+        "minor": 4,
+        "patch": 0
+    },
+
+    "configurePresets": [
+        {
+            "name": "ninja",
+            "displayName": "Ninja Release",
+            "description": "Release build using Ninja and MSVC",
+
+            "generator": "Ninja",
+
+            "binaryDir": "${sourceDir}/build",
+
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_CXX_COMPILER": "cl.exe",
+
+                "CMAKE_CXX_STANDARD": "23",
+
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/install",
+
+                "VOIDCL_BUILD_BENCHMARK": "ON",
+                "VOIDCL_ENABLE_AVX2": "ON"
+            }
+        }
+    ],
+
+    "buildPresets": [
+        {
+            "name": "ninja",
+            "configurePreset": "ninja"
+        }
+    ],
+
+    "packagePresets": []
+}

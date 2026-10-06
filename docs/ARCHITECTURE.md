@@ -2,14 +2,19 @@
 
 ## Design goals
 
-VoidCLcompute is a thin, C-ABI-compatible wrapper around OpenCL for
-elementwise array math on the GPU. It optimizes for the common case: apply
-one operation across a large float array, get the result back.
+VoidCLcompute is a thin C++ wrapper around OpenCL for elementwise array
+math on the GPU. It optimizes for the common case: apply one operation
+across a large `std::vector<float>`, get the result back.
+
+The lifecycle functions (`GC_Init`, `GC_Shutdown`, `GC_TrimBufferCache`) are
+plain `extern "C"`. The ops take `std::vector<float>` directly, which means
+the DLL and its callers must share a compiler, standard library and build
+configuration — the CMake project builds both together to guarantee that.
 
 ## Buffer pooling
 
 Device buffers are pooled and keyed by byte size rather than allocated fresh
-on every call. Repeated calls at the same `count` reuse the same underlying
+on every call. Repeated calls at the same vector size reuse the same underlying
 `cl_mem` objects, avoiding allocator churn — this matters a lot for
 benchmark-style loops that call the same op thousands of times at a few
 fixed sizes.

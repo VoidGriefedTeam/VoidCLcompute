@@ -6,6 +6,14 @@
 *.pdb
 *.exp
 *.ilk
+*.so
+*.dylib
+
+# CMake build trees
+build/
+out/
+CMakeCache.txt
+CMakeFiles/
 
 # Kernel binary cache (device-specific, regenerated at runtime)
 gwcl_kernel_cache/

@@ -1,6 +1,7 @@
 #include "../../include/VoidCLcompute.h"
 #include <vector>
 #include <thread>
+#include <functional>
 #include <chrono>
 #include <cstdio>
 #include <cmath>
@@ -20,7 +21,8 @@ static inline float heavy(float x, float y) {
 // ============================================================
 // CPU Multi-Thread
 // ============================================================
-static void worker(const float* a, const float* b, float* out, size_t s, size_t e) {
+static void worker(const std::vector<float>& a, const std::vector<float>& b,
+                   std::vector<float>& out, size_t s, size_t e) {
     for (size_t i = s; i < e; i++) {
         out[i] = heavy(a[i], b[i]);
     }
@@ -44,7 +46,7 @@ static double cpuMT(const std::vector<float>& a,
         size_t s = t * chunk;
         size_t e = std::min(s + chunk, n);
         if (s >= e) break;
-        pool.emplace_back(worker, a.data(), b.data(), out.data(), s, e);
+        pool.emplace_back(worker, std::cref(a), std::cref(b), std::ref(out), s, e);
     }
 
     for (auto& th : pool) th.join();
@@ -61,7 +63,7 @@ static double gpu(const std::vector<float>& a,
                    std::vector<float>& out) {
     auto start = std::chrono::high_resolution_clock::now();
 
-    gpu_heavy(a.data(), b.data(), out.data(), (int)a.size());
+    gpu_heavy(a, b, out);
 
     auto end = std::chrono::high_resolution_clock::now();
     return std::chrono::duration<double, std::milli>(end - start).count();
@@ -82,7 +84,7 @@ int main() {
     // entry, so the first timed size isn't paying compile/alloc cost.
     {
         std::vector<float> a(1024, 1.0f), b(1024, 2.0f), r(1024);
-        gpu_heavy(a.data(), b.data(), r.data(), 1024);
+        gpu_heavy(a, b, r);
     }
 
     const std::vector<size_t> sizes = {
@@ -107,7 +109,7 @@ int main() {
 
         // Warm CPU cache lines without polluting timed results.
         std::vector<float> dummy(std::min(n, (size_t)10000));
-        worker(a.data(), b.data(), dummy.data(), 0, dummy.size());
+        worker(a, b, dummy, 0, dummy.size());
 
         double t2 = cpuMT(a, b, r2);
         double t3 = gpu(a, b, r3);
